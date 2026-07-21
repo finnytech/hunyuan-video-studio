@@ -1,20 +1,22 @@
-"""HunyuanVideo 1.5 text-to-video wrapper.
+"""HunyuanVideo 1.5 text-to-video via Tencent's official generate.py.
 
-Wraps the diffusers `HunyuanVideo15Pipeline` and layers on every optimization:
-  * FP8 quantization of the transformer (~half the VRAM)
-  * SageAttention / SSTA attention backend (30-40% faster, softer VRAM spikes)
-  * TeaCache diffusion-step skipping (up to ~2x less render time)
-  * CPU offload + VAE tiling (fit 16s / 1080p into 80GB)
-  * 1080p via the model's super-resolution path
-  * VRAM sweep so the Foley stage starts clean
+We drive the official inference script with torchrun so every optimization is a
+real, tested flag rather than a reimplementation:
 
-The pipeline is loaded lazily and can be fully torn down to free VRAM before
-the Foley stage runs.
+  * --use_sageattn      SageAttention (faster, softer VRAM spikes)
+  * --enable_cache --cache_type teacache   TeaCache step-skipping (~2x less time)
+  * --offloading        CPU offload (fit long/1080p renders in 80GB)
+  * --sr                built-in video super-resolution -> 1080p
+  * --cfg_distilled     optional ~2x speedup
+  * fp8 gemm            automatic when sgl-kernel is installed (dtype bf16)
+
+1080p = render 720p + super-resolution upscaler. Output is a silent .mp4 that the
+Foley stage then scores.
 """
 from __future__ import annotations
 
-import gc
-import math
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -25,113 +27,21 @@ def _log(msg: str) -> None:
     print(f"[video] {msg}", flush=True)
 
 
+def _bstr(b: bool) -> str:
+    return "true" if b else "false"
+
+
 def seconds_to_frames(seconds: float) -> int:
-    """Map seconds to a valid frame count for HunyuanVideo (4*k + 1)."""
+    """Map seconds to a valid HunyuanVideo frame count (4*k + 1) at FPS."""
     seconds = max(1.0, min(float(seconds), config.MAX_SECONDS))
-    frames = int(round(seconds * config.FPS))
-    # HunyuanVideo latent temporal compression wants (4k + 1) frames.
-    frames = max(5, frames)
+    frames = max(5, int(round(seconds * config.FPS)))
     k = round((frames - 1) / 4)
     return int(4 * k + 1)
 
 
 class VideoGenerator:
-    def __init__(self) -> None:
-        self._pipe = None
-        self._loaded_res: Optional[str] = None
+    """Thin, stateless driver around the official generate.py."""
 
-    # -- lifecycle ----------------------------------------------------------
-    def _select_repo(self, resolution: str) -> tuple[str, bool]:
-        """Return (repo_local_dir, needs_superres) for a requested resolution."""
-        from .models import ensure_video_model
-
-        if resolution == "480p":
-            return str(ensure_video_model(config.VIDEO_MODEL_T2V_480)), False
-        if resolution == "720p":
-            return str(ensure_video_model(config.VIDEO_MODEL_T2V_720)), False
-        # 1080p -> render at 720p then super-res upscale.
-        return str(ensure_video_model(config.VIDEO_MODEL_T2V_720)), True
-
-    def _quantize(self, pipe) -> None:
-        if not config.FP8_TRANSFORMER:
-            return
-        try:
-            import torch
-
-            # FP8 e4m3 cast of the transformer weights: big VRAM win, tiny quality cost.
-            for name, module in pipe.transformer.named_modules():
-                if hasattr(module, "weight") and module.weight is not None:
-                    if module.weight.dtype in (torch.float16, torch.bfloat16):
-                        module.weight.data = module.weight.data.to(torch.float8_e4m3fn)
-            _log("FP8 transformer quantization applied ✓")
-        except Exception as e:  # noqa: BLE001
-            _log(f"FP8 quant skipped ({e}); continuing in bf16")
-
-    def _enable_sage_attention(self, pipe) -> None:
-        if not config.USE_SAGE_ATTENTION:
-            return
-        try:
-            pipe.transformer.set_attention_backend(config.ATTENTION_BACKEND)
-            _log(f"attention backend -> {config.ATTENTION_BACKEND} ✓")
-        except Exception as e:  # noqa: BLE001
-            _log(f"sage/attention backend not set ({e})")
-
-    def _enable_teacache(self, pipe) -> None:
-        if not config.USE_TEACACHE:
-            return
-        try:
-            # diffusers exposes cache helpers on recent versions.
-            from diffusers.hooks import apply_teacache  # type: ignore
-
-            apply_teacache(pipe.transformer, threshold=config.TEACACHE_THRESH)
-            _log(f"TeaCache enabled (thresh={config.TEACACHE_THRESH}) ✓")
-        except Exception as e:  # noqa: BLE001
-            _log(f"TeaCache not available ({e}); skipping")
-
-    def load(self, resolution: str) -> None:
-        if self._pipe is not None and self._loaded_res == resolution:
-            return
-        self.unload()
-
-        import torch
-        from diffusers import HunyuanVideo15Pipeline
-
-        repo, _ = self._select_repo(resolution)
-        _log(f"loading pipeline from {repo} (bf16) ...")
-        pipe = HunyuanVideo15Pipeline.from_pretrained(repo, torch_dtype=torch.bfloat16)
-
-        self._enable_sage_attention(pipe)
-        self._quantize(pipe)
-        self._enable_teacache(pipe)
-
-        if config.CPU_OFFLOAD:
-            pipe.enable_model_cpu_offload()
-            _log("model CPU offload enabled ✓")
-        else:
-            pipe.to("cuda")
-        if config.VAE_TILING:
-            pipe.vae.enable_tiling()
-            _log("VAE tiling enabled ✓")
-
-        self._pipe = pipe
-        self._loaded_res = resolution
-
-    def unload(self) -> None:
-        if self._pipe is not None:
-            _log("unloading video pipeline + sweeping VRAM ...")
-        self._pipe = None
-        self._loaded_res = None
-        gc.collect()
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-        except Exception:  # noqa: BLE001
-            pass
-
-    # -- generation ---------------------------------------------------------
     def generate(
         self,
         prompt: str,
@@ -141,57 +51,70 @@ class VideoGenerator:
         seed: Optional[int] = None,
         out_path: Optional[Path] = None,
     ) -> Path:
-        import torch
-        from diffusers.utils import export_to_video
+        from .models import ensure_video
 
-        resolution = resolution if resolution in config.RESOLUTIONS else config.DEFAULT_RESOLUTION
-        self.load(resolution)
-        assert self._pipe is not None
+        code_dir, weights_dir = ensure_video()
 
-        width, height = config.RESOLUTIONS[resolution]
-        needs_superres = resolution == "1080p"
-        gen_w, gen_h = (config.RESOLUTIONS["720p"] if needs_superres else (width, height))
-
+        resolution = resolution if resolution in config.RESOLUTION_MAP else config.DEFAULT_RESOLUTION
+        res_flag, needs_sr = config.RESOLUTION_MAP[resolution]
         num_frames = seconds_to_frames(seconds)
-        steps = steps or config.DEFAULT_STEPS
-        generator = None
-        if seed is not None:
-            generator = torch.Generator(device="cuda").manual_seed(int(seed))
-
-        _log(f"generate: {num_frames}f @ {gen_w}x{gen_h}, {steps} steps, res={resolution}")
-        result = self._pipe(
-            prompt=prompt,
-            width=gen_w,
-            height=gen_h,
-            num_frames=num_frames,
-            num_inference_steps=steps,
-            generator=generator,
-        )
-        frames = result.frames[0]
-
-        if needs_superres:
-            frames = self._super_resolve(frames, (width, height))
+        steps = int(steps or config.DEFAULT_STEPS)
+        seed_val = int(seed) if seed is not None else 123
 
         out_path = out_path or (config.OUTPUT_DIR / "video_silent.mp4")
-        export_to_video(frames, str(out_path), fps=config.FPS)
-        _log(f"silent video written: {out_path}")
-        return out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _super_resolve(self, frames, target_wh):
-        """Upscale frames to 1080p. Uses the pipeline's SR module if present,
-        else a high-quality Lanczos fallback (still crisp, no extra VRAM)."""
+        cmd = [
+            "torchrun", f"--nproc_per_node={config.NPROC}", "generate.py",
+            "--prompt", prompt,
+            "--negative_prompt", "",
+            "--resolution", res_flag,
+            "--aspect_ratio", config.DEFAULT_ASPECT,
+            "--video_length", str(num_frames),
+            "--num_inference_steps", str(steps),
+            "--total_steps", str(steps),
+            "--seed", str(seed_val),
+            "--image_path", "none",
+            "--model_path", str(weights_dir),
+            "--output_path", str(out_path),
+            "--dtype", config.DTYPE,
+            "--rewrite", _bstr(config.REWRITE),
+            "--cfg_distilled", _bstr(config.CFG_DISTILLED),
+            "--sparse_attn", _bstr(config.SPARSE_ATTN),
+            "--use_sageattn", _bstr(config.USE_SAGE_ATTENTION),
+            "--sage_blocks_range", config.SAGE_BLOCKS_RANGE,
+            "--enable_cache", _bstr(config.ENABLE_CACHE),
+            "--cache_type", config.CACHE_TYPE,
+            "--offloading", _bstr(config.OFFLOADING),
+            "--overlap_group_offloading", _bstr(config.OVERLAP_GROUP_OFFLOADING),
+            "--sr", _bstr(needs_sr),
+        ]
+
+        _log(f"render: {num_frames}f, res={resolution} (sr={needs_sr}), {steps} steps")
+        _log("cmd: " + " ".join(cmd))
+        subprocess.run(cmd, check=True, cwd=str(code_dir))
+
+        if out_path.exists():
+            return out_path
+        # generate.py may append its own suffix if it ignored --output_path; grab newest.
+        produced = sorted(
+            list(out_path.parent.rglob("*.mp4")) + list((Path(code_dir) / "outputs").rglob("*.mp4")),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if not produced:
+            raise RuntimeError("generate.py produced no output video")
+        return produced[0]
+
+    def unload(self) -> None:
+        """No in-process model to unload — generate.py exits and frees the GPU
+        by itself, so VRAM is already clean before the Foley stage."""
+        import gc
+
+        gc.collect()
         try:
-            if hasattr(self._pipe, "super_resolution") and self._pipe.super_resolution:
-                _log("applying HunyuanVideo super-resolution ...")
-                return self._pipe.super_resolution(frames, target_size=target_wh)
-        except Exception as e:  # noqa: BLE001
-            _log(f"native SR unavailable ({e}); using Lanczos upscale")
-        import numpy as np
-        from PIL import Image
+            import torch
 
-        w, h = target_wh
-        out = []
-        for f in frames:
-            img = f if isinstance(f, Image.Image) else Image.fromarray(np.asarray(f))
-            out.append(img.resize((w, h), Image.LANCZOS))
-        return out
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass

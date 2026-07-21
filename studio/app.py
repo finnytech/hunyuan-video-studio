@@ -104,8 +104,8 @@ def build_ui() -> gr.Blocks:
                         value=config.DEFAULT_RESOLUTION, label="Resolution",
                     )
                 with gr.Row():
-                    steps = gr.Slider(10, 50, value=config.DEFAULT_STEPS, step=1,
-                                      label="Steps (quality vs speed)")
+                    steps = gr.Slider(20, 50, value=config.DEFAULT_STEPS, step=1,
+                                      label="Steps (50 = best quality)")
                     seed = gr.Textbox(label="Seed (blank = random)", value="")
                 go = gr.Button("Generate 🎬", variant="primary")
                 status = gr.Markdown("")
