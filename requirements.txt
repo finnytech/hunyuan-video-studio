@@ -1,0 +1,20 @@
+# Core studio deps. Torch is installed separately in setup.sh to match CUDA.
+# HunyuanVideo 1.5 needs a recent diffusers with the HunyuanVideo15Pipeline.
+diffusers>=0.36.0
+transformers>=4.46.0
+accelerate>=1.0.0
+safetensors>=0.4.5
+huggingface_hub>=0.26.0
+# Attention kernels for HunyuanVideo 1.5 variable-length masks (flash_hub etc.)
+kernels>=0.4.0
+# UI + media
+gradio>=4.44.0
+imageio>=2.34.0
+imageio-ffmpeg>=0.5.1
+Pillow>=10.3.0
+numpy>=1.26.0
+einops>=0.8.0
+sentencepiece>=0.2.0
+# Foley (extra deps are also installed from its own requirements.txt in setup.sh)
+soundfile>=0.12.1
+librosa>=0.10.2
