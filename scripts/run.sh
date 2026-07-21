@@ -7,8 +7,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# Activate .venv if present, else use the active env (Lightning conda base).
 # shellcheck disable=SC1091
-source "$ROOT/.venv/bin/activate"
+source "$ROOT/scripts/_env.sh"
 
 # A100-friendly runtime defaults (override by exporting before calling run.sh).
 export USE_SAGE_ATTENTION="${USE_SAGE_ATTENTION:-1}"   # SageAttention
@@ -29,5 +30,5 @@ if [ "${1:-}" = "--auth-only-local" ]; then
   echo "==> local-only mode (no public link). Use an SSH tunnel to reach it."
 fi
 
-echo "==> launching HunyuanVideo Studio (watch for the share link + token below)"
-exec python -m studio.app
+echo "==> launching HunyuanVideo Studio (env: $STUDIO_ENV_KIND; watch for the link + token below)"
+exec "$PYBIN" -m studio.app
