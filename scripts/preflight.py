@@ -47,7 +47,8 @@ def main() -> int:
     core_missing: list[str] = []
     optional_missing: list[str] = []
 
-    for mod in ("gradio", "torch", "huggingface_hub", "numpy"):
+    # einops is imported directly by the video model code, so it's CORE.
+    for mod in ("gradio", "torch", "huggingface_hub", "numpy", "einops"):
         if not _have(mod):
             core_missing.append(f"pip:{mod}")
 

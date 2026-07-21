@@ -111,7 +111,9 @@ def generate(prompt, seconds, resolution, steps, seed):
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="HunyuanVideo Studio", theme=gr.themes.Soft()) as demo:
+    # theme is passed at launch() (Gradio 6 moved it there); _safe_launch drops it
+    # gracefully on older Gradio that still expects it on Blocks().
+    with gr.Blocks(title="HunyuanVideo Studio") as demo:
         gr.Markdown(
             "# 🎬 HunyuanVideo Studio\n"
             "Text → video **with native, timeline-synced sound**. "
@@ -180,6 +182,7 @@ def main() -> None:
         auth=make_auth_callback(token),
         auth_message="Enter the access token (as password) to use the studio.",
         show_api=False,
+        theme=gr.themes.Soft(),
         max_threads=config.MAX_CONCURRENCY + 2,
     )
 

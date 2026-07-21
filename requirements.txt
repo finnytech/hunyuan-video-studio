@@ -8,3 +8,6 @@ hf_transfer>=0.1.8
 imageio-ffmpeg>=0.5.1
 Pillow>=10.3.0
 numpy>=1.26.0
+# einops is imported directly by the video model code; install it explicitly so
+# it's present even when flash_attn (its usual transitive source) doesn't build.
+einops>=0.7.0
