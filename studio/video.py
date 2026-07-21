@@ -1,26 +1,26 @@
 """HunyuanVideo 1.5 text-to-video via Tencent's official generate.py.
 
-We drive the official inference script with torchrun so every optimization is a
-real, tested flag rather than a reimplementation:
+Driven with torchrun so every optimization is a real, tested upstream flag:
 
-  * --use_sageattn      SageAttention (faster, softer VRAM spikes)
-  * --enable_cache --cache_type teacache   TeaCache step-skipping (~2x less time)
-  * --offloading        CPU offload (fit long/1080p renders in 80GB)
-  * --sr                built-in video super-resolution -> 1080p
-  * --cfg_distilled     optional ~2x speedup
-  * fp8 gemm            automatic when sgl-kernel is installed (dtype bf16)
+  * --use_sageattn                         SageAttention (faster, softer VRAM spikes)
+  * --enable_cache --cache_type teacache   TeaCache step-skipping (~2x less time),
+                                           with tuned start/end/interval
+  * --offloading / group offload           fit long / 1080p renders in 80GB
+  * --sr                                    built-in video super-resolution -> 1080p
+  * --cfg_distilled (optional)             ~2x speedup
+  * fp8 gemm                                automatic when sgl-kernel is installed
+  * TF32 + CPU-thread tuning                via the runner's child env
 
-1080p = render 720p + super-resolution upscaler. Output is a silent .mp4 that the
-Foley stage then scores.
+Each render is its own process. When generate.py exits, the OS reclaims ALL of its
+VRAM, so the video model is fully out of VRAM before the Foley stage starts — no
+contention. The finished silent video is saved locally in the videos folder.
 """
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
-from . import config
+from . import config, runner
 
 
 def _log(msg: str) -> None:
@@ -40,7 +40,7 @@ def seconds_to_frames(seconds: float) -> int:
 
 
 class VideoGenerator:
-    """Thin, stateless driver around the official generate.py."""
+    """Stateless driver around the official generate.py."""
 
     def generate(
         self,
@@ -61,7 +61,7 @@ class VideoGenerator:
         steps = int(steps or config.DEFAULT_STEPS)
         seed_val = int(seed) if seed is not None else 123
 
-        out_path = out_path or (config.OUTPUT_DIR / "video_silent.mp4")
+        out_path = Path(out_path) if out_path else (config.OUTPUT_DIR / "video_silent.mp4")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         cmd = [
@@ -85,29 +85,47 @@ class VideoGenerator:
             "--sage_blocks_range", config.SAGE_BLOCKS_RANGE,
             "--enable_cache", _bstr(config.ENABLE_CACHE),
             "--cache_type", config.CACHE_TYPE,
+            "--cache_start_step", str(config.CACHE_START_STEP),
+            "--cache_end_step", str(config.CACHE_END_STEP),
+            "--cache_step_interval", str(config.CACHE_STEP_INTERVAL),
             "--offloading", _bstr(config.OFFLOADING),
             "--overlap_group_offloading", _bstr(config.OVERLAP_GROUP_OFFLOADING),
             "--sr", _bstr(needs_sr),
         ]
 
-        _log(f"render: {num_frames}f, res={resolution} (sr={needs_sr}), {steps} steps")
-        _log("cmd: " + " ".join(cmd))
-        subprocess.run(cmd, check=True, cwd=str(code_dir))
-
-        if out_path.exists():
-            return out_path
-        # generate.py may append its own suffix if it ignored --output_path; grab newest.
-        produced = sorted(
-            list(out_path.parent.rglob("*.mp4")) + list((Path(code_dir) / "outputs").rglob("*.mp4")),
-            key=lambda p: p.stat().st_mtime, reverse=True,
+        _log(f"render: {num_frames}f, res={resolution} (sr={needs_sr}), {steps} steps, seed={seed_val}")
+        runner.run(
+            cmd, cwd=code_dir, stage="video",
+            timeout=config.VIDEO_TIMEOUT, retries=config.STAGE_RETRIES,
         )
+
+        result = self._resolve_output(out_path, code_dir)
+        _log(f"silent video ready: {result}")
+        return result
+
+    def _resolve_output(self, out_path: Path, code_dir: Path) -> Path:
+        """generate.py may honour --output_path or append its own name; find the file."""
+        if out_path.exists() and out_path.stat().st_size > 0:
+            return out_path
+        search_dirs = [out_path.parent, Path(code_dir) / "outputs"]
+        produced = []
+        for d in search_dirs:
+            if d.exists():
+                produced += [p for p in d.rglob("*.mp4") if p.stat().st_size > 0]
         if not produced:
-            raise RuntimeError("generate.py produced no output video")
-        return produced[0]
+            raise RuntimeError("generate.py produced no output video (see outputs/logs)")
+        newest = max(produced, key=lambda p: p.stat().st_mtime)
+        if newest != out_path:
+            try:
+                newest.replace(out_path)
+                return out_path
+            except Exception:  # noqa: BLE001
+                return newest
+        return newest
 
     def unload(self) -> None:
-        """No in-process model to unload — generate.py exits and frees the GPU
-        by itself, so VRAM is already clean before the Foley stage."""
+        """generate.py runs as a separate process, so its VRAM is already fully
+        released on exit. We still sweep our own (tiny) process for good measure."""
         import gc
 
         gc.collect()

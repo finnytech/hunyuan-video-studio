@@ -1,16 +1,18 @@
-"""Gradio web UI: prompt / length / resolution -> video with native-feeling sound.
+"""Gradio web UI: prompt / length / resolution -> video with native sound.
 
-Flow per request:
-  1. HunyuanVideo 1.5 renders a silent video (with all optimizations).
-  2. Video pipeline is torn down -> VRAM swept clean.
-  3. HunyuanVideo-Foley generates + syncs audio to the timeline.
-  4. Final MP4 is normalized and offered via a download button.
+Order of operations (exactly what you asked for):
+  1. HunyuanVideo 1.5 renders the video (own process; full VRAM to the video model).
+  2. That process EXITS -> its VRAM is fully released. Silent video saved locally.
+  3. HunyuanVideo-Foley generates + syncs native sound to the timeline.
+  4. Only once BOTH video and sound are done is the finished MP4 revealed in the
+     browser (streamed) and the download button shown.
 
-The whole app sits behind a one-time token gate (see auth.py), so the public
-share link can't be abused by bots.
+Nothing is streamed to the web mid-render. The whole app sits behind a one-time
+token gate so bots can't spam the endpoint.
 """
 from __future__ import annotations
 
+import shutil
 import threading
 import time
 import traceback
@@ -23,62 +25,87 @@ from . import config, foley, mux
 from .auth import generate_token, make_auth_callback
 from .video import VideoGenerator
 
-# Single shared generator + a lock: one GPU, one job at a time.
 _VIDEO = VideoGenerator()
-_GPU_LOCK = threading.Lock()
+_GPU_LOCK = threading.Lock()          # one GPU -> one job at a time
 
 
 def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def generate(prompt: str, seconds: float, resolution: str, steps: int, seed,
-             progress=gr.Progress(track_tqdm=True)):
+def _busy_ui(msg: str):
+    # status, video(hidden/empty), download(hidden), generate-button(disabled)
+    return (msg, None, gr.update(visible=False), gr.update(interactive=False))
+
+
+def _done_ui(msg: str, final_path: str):
+    return (
+        msg,
+        final_path,                                   # reveal + stream the finished MP4
+        gr.update(value=final_path, visible=True),    # show download button
+        gr.update(interactive=True),
+    )
+
+
+def generate(prompt, seconds, resolution, steps, seed):
+    """Generator: streams status; only reveals the video when fully finished."""
     prompt = (prompt or "").strip()
     if not prompt:
-        raise gr.Error("Please enter a prompt.")
+        yield ("⚠️ Please enter a prompt.", None,
+               gr.update(visible=False), gr.update(interactive=True))
+        return
+
     if not _GPU_LOCK.acquire(blocking=False):
-        raise gr.Error("The GPU is busy with another generation. Try again shortly.")
+        yield ("⏳ The GPU is busy with another generation. Try again shortly.", None,
+               gr.update(visible=False), gr.update(interactive=True))
+        return
+
     t0 = time.time()
     try:
+        yield _busy_ui("🎬 Stage 1/3 — rendering video (HunyuanVideo 1.5)…")
         stamp = _stamp()
         work = config.OUTPUT_DIR / stamp
         work.mkdir(parents=True, exist_ok=True)
         seed_val = int(seed) if str(seed).strip() else None
 
-        progress(0.05, desc="Rendering video (HunyuanVideo 1.5)...")
+        # 1) video -> saved locally in the work/videos folder
         silent = _VIDEO.generate(
-            prompt=prompt,
-            seconds=float(seconds),
-            resolution=resolution,
-            steps=int(steps),
-            seed=seed_val,
-            out_path=work / "silent.mp4",
+            prompt=prompt, seconds=float(seconds), resolution=resolution,
+            steps=int(steps), seed=seed_val, out_path=work / "silent.mp4",
         )
+        t_video = time.time() - t0
 
-        # Free the video model before Foley so it starts on a clean GPU.
-        progress(0.55, desc="Freeing VRAM...")
+        # 2) make sure the video model is out of VRAM before sound
+        yield _busy_ui(f"🧹 Stage 2/3 — video done in {t_video:.0f}s, freeing VRAM…")
         _VIDEO.unload()
 
-        progress(0.6, desc="Generating + syncing sound (Foley)...")
+        # 3) native, timeline-synced sound
+        yield _busy_ui("🔊 Stage 3/3 — generating + syncing native sound (Foley)…")
         with_sound = foley.add_foley(silent, prompt, out_dir=work / "foley")
 
-        progress(0.9, desc="Finalizing MP4...")
+        # ensure audio is actually present + aligned; fallback to explicit mux
         if not foley.has_audio_stream(with_sound):
-            # Fallback: Foley returned audio-only or separate track.
-            audio = next(iter(sorted((work / "foley").rglob("*.wav"))), None)
-            if audio:
-                with_sound = mux.mux(silent, audio, work / "muxed.mp4")
-        final = mux.normalize_final(with_sound, work / "download.mp4")
+            audio = foley.newest_audio(work / "foley")
+            if not audio:
+                raise RuntimeError("Foley returned no audio track")
+            with_sound = mux.mux(silent, audio, work / "muxed.mp4")
+
+        # normalize to a browser/download-friendly MP4 (H.264 + AAC + faststart)
+        final = mux.normalize_final(with_sound, work / "final.mp4")
+
+        # collect the finished file in the videos folder with a clean name
+        dest = config.VIDEOS_DIR / f"hunyuan_{stamp}.mp4"
+        shutil.copy2(final, dest)
 
         dt = time.time() - t0
-        status = f"✅ Done in {dt:.1f}s — {seconds}s @ {resolution}"
-        return str(final), str(final), status
-    except gr.Error:
-        raise
+        msg = (f"✅ Done in {dt:.0f}s  ·  video {t_video:.0f}s + sound "
+               f"{dt - t_video:.0f}s  ·  {int(float(seconds))}s @ {resolution}")
+        yield _done_ui(msg, str(dest))
+
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
-        raise gr.Error(f"Generation failed: {e}")
+        yield (f"❌ Generation failed: {e}", None,
+               gr.update(visible=False), gr.update(interactive=True))
     finally:
         _GPU_LOCK.release()
 
@@ -87,8 +114,9 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="HunyuanVideo Studio", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
             "# 🎬 HunyuanVideo Studio\n"
-            "Text → video **with native-feeling sound**. "
-            "HunyuanVideo 1.5 + HunyuanVideo-Foley on A100."
+            "Text → video **with native, timeline-synced sound**. "
+            "HunyuanVideo 1.5 + HunyuanVideo-Foley on A100. "
+            "_The video appears only once both video and sound are finished._"
         )
         with gr.Row():
             with gr.Column(scale=3):
@@ -100,7 +128,7 @@ def build_ui() -> gr.Blocks:
                     seconds = gr.Slider(1, config.MAX_SECONDS, value=config.DEFAULT_SECONDS,
                                         step=1, label="Length (seconds)")
                     resolution = gr.Radio(
-                        list(config.RESOLUTIONS.keys()),
+                        list(config.RESOLUTION_MAP.keys()),
                         value=config.DEFAULT_RESOLUTION, label="Resolution",
                     )
                 with gr.Row():
@@ -110,20 +138,19 @@ def build_ui() -> gr.Blocks:
                 go = gr.Button("Generate 🎬", variant="primary")
                 status = gr.Markdown("")
             with gr.Column(scale=4):
-                video_out = gr.Video(label="Result", autoplay=True)
-                download = gr.DownloadButton(label="⬇️ Download MP4")
+                video_out = gr.Video(label="Result (video + native sound)", autoplay=True)
+                download = gr.DownloadButton(label="⬇️ Download MP4", visible=False)
 
         go.click(
             generate,
             inputs=[prompt, seconds, resolution, steps, seed],
-            outputs=[video_out, download, status],
+            outputs=[status, video_out, download, go],
             concurrency_limit=config.MAX_CONCURRENCY,
         )
     return demo
 
 
 def main() -> None:
-    # Warm model presence check (self-heals a fresh VM).
     try:
         from .models import ensure_all
 
@@ -137,7 +164,7 @@ def main() -> None:
 
     print("\n" + "=" * 62)
     print("  HunyuanVideo Studio is starting")
-    print("  🔑 Access token (use as password on login):")
+    print("  🔑 Access token (use as the PASSWORD on login):")
     print(f"       {token}")
     print("  Username can be anything.")
     print("=" * 62 + "\n", flush=True)

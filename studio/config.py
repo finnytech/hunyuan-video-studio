@@ -80,6 +80,9 @@ SAGE_BLOCKS_RANGE = os.environ.get("SAGE_BLOCKS_RANGE", "0-53")
 # Feature cache (TeaCache/DeepCache/TaylorCache): up to ~2x less render time.
 ENABLE_CACHE = _flag("ENABLE_CACHE", True)
 CACHE_TYPE = os.environ.get("CACHE_TYPE", "teacache")  # deepcache | teacache | taylorcache
+CACHE_START_STEP = _int("CACHE_START_STEP", 11)   # begin skipping steps here
+CACHE_END_STEP = _int("CACHE_END_STEP", 45)       # stop skipping here
+CACHE_STEP_INTERVAL = _int("CACHE_STEP_INTERVAL", 4)
 # CPU offloading: fit long/1080p renders comfortably in 80GB.
 OFFLOADING = _flag("OFFLOADING", True)
 OVERLAP_GROUP_OFFLOADING = _flag("OVERLAP_GROUP_OFFLOADING", True)
@@ -93,6 +96,23 @@ DTYPE = os.environ.get("STUDIO_DTYPE", "bf16")  # bf16 | fp32; fp8 gemm via sgl-
 
 # Foley offload (XXL: 20GB -> 12GB). Auto-enabled if free VRAM is tight.
 FOLEY_OFFLOAD = _flag("FOLEY_OFFLOAD", False)
+
+# --- Speed / hardware tuning (A100 80GB, 12 vCPU) --------------------------
+# TF32 matmul + cuDNN autotune: free throughput on Ampere, no quality hit.
+ENABLE_TF32 = _flag("ENABLE_TF32", True)
+# CPU threads for data/VAE work. 12 vCPU -> leave a couple for the OS/UI.
+CPU_THREADS = _int("STUDIO_CPU_THREADS", 10)
+# Hard timeouts (seconds) so a wedged subprocess can't pin the GPU forever.
+VIDEO_TIMEOUT = _int("STUDIO_VIDEO_TIMEOUT", 3600)
+FOLEY_TIMEOUT = _int("STUDIO_FOLEY_TIMEOUT", 1200)
+# Retry a stage once on transient failure (OOM hiccup, kernel autotune, etc.).
+STAGE_RETRIES = _int("STUDIO_STAGE_RETRIES", 1)
+# Where finished, downloadable videos are collected on the VM.
+VIDEOS_DIR = Path(os.environ.get("STUDIO_VIDEOS_DIR", ROOT / "outputs" / "videos"))
+VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+# Subprocess log directory for post-mortem debugging.
+LOG_DIR = Path(os.environ.get("STUDIO_LOG_DIR", ROOT / "outputs" / "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # --- Server / auth ---------------------------------------------------------

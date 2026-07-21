@@ -67,6 +67,17 @@ prompt (as audio hint) ─► HunyuanVideo-Foley (official infer.py) ─► vide
 rewriting needs a separate vLLM server; the studio stays self-contained. All toggles live in
 `studio/config.py` and are env-overridable from `run.sh`.
 
+**Extra speed + robustness layer:**
+- **TF32 matmul + cuDNN autotune** and **CPU-thread tuning** (10 of 12 vCPU) via the runner's child env.
+- **TeaCache tuned** (`cache_start_step / end_step / step_interval`) instead of default on/off.
+- Each stage runs as its **own process** → 100% of the video model's VRAM is reclaimed by the OS
+  before Foley starts. No in-process contention.
+- **Hard timeouts + one automatic retry** per stage; full stdout/stderr saved to `outputs/logs/`
+  for post-mortem.
+- **Reveal-when-done UI**: nothing streams to the browser mid-render — the video appears (and the
+  download button unlocks) only after video **and** sound are finished and the audio track is verified.
+- Finished MP4s are collected in `outputs/videos/hunyuan_<timestamp>.mp4` on the VM.
+
 ## 3. Security model
 
 - Gradio `share=True` gives a public `*.gradio.live` URL, but the app is wrapped in a
