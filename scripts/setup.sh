@@ -20,10 +20,18 @@ if [ -n "${STUDIO_NO_VENV:-}" ] || [ -d /teamspace/studios ] || [ -n "${CONDA_PR
 fi
 
 # --- 1. system deps -------------------------------------------------------
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "==> installing ffmpeg + git-lfs"
-  (sudo apt-get update -y && sudo apt-get install -y ffmpeg git-lfs) \
-    || echo "!! could not apt-get ffmpeg; ensure it's available"
+# ffmpeg binary + git-lfs + ffmpeg DEV headers & pkg-config (needed to build
+# PyAV / some audio deps from source; cheap no-op if already installed).
+APT_PKGS=""
+command -v ffmpeg     >/dev/null 2>&1 || APT_PKGS="$APT_PKGS ffmpeg"
+command -v git-lfs    >/dev/null 2>&1 || APT_PKGS="$APT_PKGS git-lfs"
+command -v pkg-config >/dev/null 2>&1 || APT_PKGS="$APT_PKGS pkg-config"
+APT_PKGS="$APT_PKGS libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev libavfilter-dev libswscale-dev libswresample-dev"
+if [ -n "$APT_PKGS" ]; then
+  echo "==> installing system deps:$APT_PKGS"
+  # shellcheck disable=SC2086
+  (sudo apt-get update -y && sudo apt-get install -y $APT_PKGS) \
+    || echo "!! apt-get failed for some packages (video still works; check logs)"
 fi
 command -v git-lfs >/dev/null 2>&1 && git lfs install || true
 
@@ -61,10 +69,17 @@ echo "==> ensuring HunyuanVideo-1.5 and HunyuanVideo-Foley (code + weights)"
 "$PYBIN" -m studio.models
 
 # --- 6. install each model's own requirements -----------------------------
+# Strip flash_attn from the pinned requirements: it builds from source and needs
+# torch importable in the build env; under pip build isolation it fails and that
+# ONE failure aborts the whole -r install (leaving diffusers/transformers/etc
+# uninstalled). We install flash-attn separately, best-effort, in step 7.
 for d in "$MODELS_DIR/HunyuanVideo-1.5" "$MODELS_DIR/HunyuanVideo-Foley"; do
   if [ -f "$d/requirements.txt" ]; then
-    echo "==> installing requirements for $(basename "$d")"
-    PIP install -r "$d/requirements.txt" || echo "!! some deps in $d failed; check logs"
+    echo "==> installing requirements for $(basename "$d") (flash_attn handled separately)"
+    REQ_FILTERED="$(mktemp)"
+    grep -viE '^\s*flash[-_]attn' "$d/requirements.txt" > "$REQ_FILTERED" || true
+    PIP install -r "$REQ_FILTERED" || echo "!! some deps in $d failed; check logs"
+    rm -f "$REQ_FILTERED"
   fi
 done
 
@@ -80,8 +95,15 @@ fi
 echo "==> installing sgl-kernel (enables FP8 gemm)"
 PIP install sgl-kernel==0.3.18 2>/dev/null || echo "   (sgl-kernel optional — skipped)"
 
-echo "==> installing flash-attn (best-effort)"
-PIP install flash-attn --no-build-isolation 2>/dev/null || echo "   (flash-attn optional — skipped)"
+if "$PYBIN" -c "import flash_attn" 2>/dev/null; then
+  echo "==> flash-attn already present ✓"
+else
+  echo "==> installing flash-attn (best-effort)"
+  PIP install flash-attn --no-build-isolation 2>/dev/null || echo "   (flash-attn optional — skipped)"
+fi
+
+# Sentinel so run.sh won't loop re-running setup for a stubborn optional dep.
+touch "$ROOT/.setup-complete"
 
 echo ""
 echo "==> setup complete ✓ (env: $STUDIO_ENV_KIND)   run:  bash scripts/run.sh"
