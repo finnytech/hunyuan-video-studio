@@ -23,6 +23,11 @@ export REWRITE="${REWRITE:-0}"                         # OFF: prompt-rewrite nee
 export STUDIO_DTYPE="${STUDIO_DTYPE:-bf16}"            # bf16 + sgl-kernel => FP8 gemm
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM=false
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"   # fast HF downloads
+
+if [ -z "${HF_TOKEN:-}" ] && [ -z "${HUGGING_FACE_HUB_TOKEN:-}" ]; then
+  echo "⚠️  HF_TOKEN not set — HF downloads will be rate-limited. export HF_TOKEN=hf_xxx"
+fi
 
 if [ "${1:-}" = "--auth-only-local" ]; then
   export STUDIO_SHARE=0

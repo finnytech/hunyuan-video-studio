@@ -46,6 +46,17 @@ VIDEO_MODEL_REPO = os.environ.get("VIDEO_MODEL_REPO", "tencent/HunyuanVideo-1.5"
 VIDEO_CODE_DIR = MODELS_DIR / "HunyuanVideo-1.5"            # code checkout (generate.py)
 VIDEO_WEIGHTS_DIR = MODELS_DIR / "HunyuanVideo-1.5-weights"  # HF weights
 
+# The full tencent/HunyuanVideo-1.5 repo is ~372GB (11 transformer variants @33GB).
+# We only pull the transformer variants we actually use, cutting it to ~72GB.
+# Override with a comma list, e.g. STUDIO_VIDEO_VARIANTS="720p_t2v,1080p_sr_distilled".
+VIDEO_VARIANTS = [
+    v.strip() for v in os.environ.get(
+        "STUDIO_VIDEO_VARIANTS", "720p_t2v,1080p_sr_distilled"
+    ).split(",") if v.strip()
+]
+# Faster HF downloads (Rust multi-threaded transfer). Set 0 to disable.
+HF_FAST = _flag("STUDIO_HF_FAST", True)
+
 # --- HunyuanVideo-Foley (sound) -------------------------------------------
 FOLEY_REPO_URL = os.environ.get(
     "FOLEY_REPO_URL", "https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley"
@@ -71,6 +82,20 @@ RESOLUTION_MAP = {
     "1080p": ("720p", True),
 }
 DEFAULT_RESOLUTION = os.environ.get("STUDIO_DEFAULT_RES", "720p")
+
+
+def available_resolutions(variants):
+    """Only offer UI resolutions whose transformer variant was actually downloaded.
+    480p needs 480p_t2v; 720p/1080p need 720p_t2v (1080p adds the SR upsampler)."""
+    vset = set(variants)
+    out = []
+    if "480p_t2v" in vset:
+        out.append("480p")
+    if "720p_t2v" in vset:
+        out.append("720p")
+        if "1080p_sr_distilled" in vset:
+            out.append("1080p")
+    return out or ["720p"]
 
 
 # --- Optimization toggles (A100-friendly, real generate.py flags) ----------

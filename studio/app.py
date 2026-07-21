@@ -127,9 +127,12 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     seconds = gr.Slider(1, config.MAX_SECONDS, value=config.DEFAULT_SECONDS,
                                         step=1, label="Length (seconds)")
+                    _res_choices = config.available_resolutions(config.VIDEO_VARIANTS)
+                    _res_default = (config.DEFAULT_RESOLUTION
+                                    if config.DEFAULT_RESOLUTION in _res_choices
+                                    else _res_choices[0])
                     resolution = gr.Radio(
-                        list(config.RESOLUTION_MAP.keys()),
-                        value=config.DEFAULT_RESOLUTION, label="Resolution",
+                        _res_choices, value=_res_default, label="Resolution",
                     )
                 with gr.Row():
                     steps = gr.Slider(20, 50, value=config.DEFAULT_STEPS, step=1,

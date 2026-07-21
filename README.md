@@ -101,6 +101,39 @@ studio/auth.py     one-time token OAuth-style gate
 studio/app.py      Gradio UI (prompt / length / resolution → video + download)
 ```
 
+## 4b. Storage — minimal weights (~72 GB, not ~372 GB)
+
+The full `tencent/HunyuanVideo-1.5` repo ships **11 transformer variants @ ~33 GB each**
+(≈372 GB). This studio downloads **only the variants it uses** via `allow_patterns`:
+
+```
+720p_t2v            (33 GB)  ← text-to-video base
+1080p_sr_distilled  (33 GB)  ← super-resolution to 1080p
+vae + upsampler + scheduler + config  (~5.5 GB)
+```
+
+→ **~72 GB total** instead of 372 GB. Plus **hf_transfer** (Rust multi-threaded) for
+much faster, un-throttled downloads. **Set `HF_TOKEN`** to avoid rate limits:
+
+```bash
+export HF_TOKEN=hf_xxx
+```
+
+Pick different variants any time:
+
+```bash
+export STUDIO_VIDEO_VARIANTS="720p_t2v,480p_t2v,1080p_sr_distilled"
+```
+
+**Already downloaded the giant version / a broken partial?** Wipe and re-fetch minimal:
+
+```bash
+bash scripts/reset_weights.sh
+```
+
+Only the resolutions whose variant is present are shown in the UI, so you can't pick a
+resolution you didn't download.
+
 ## 5. Requirements
 
 A100/L40S-class GPU, CUDA 12.4 (or 11.8), Python 3.10+, Linux, ffmpeg, git-lfs.
