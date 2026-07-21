@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from . import config, runner
+from . import config, prompt_enhance, runner
 
 
 def _log(msg: str) -> None:
@@ -61,13 +61,28 @@ class VideoGenerator:
         steps = int(steps or config.DEFAULT_STEPS)
         seed_val = int(seed) if seed is not None else 123
 
+        if config.ENHANCE_PROMPT:
+            enhanced = prompt_enhance.enhance(prompt)
+            if enhanced != prompt:
+                _log("cinematic enhancement applied")
+            prompt = enhanced
+        negative = prompt_enhance.negative() if config.ENHANCE_PROMPT else ""
+
+        # Smart VRAM: keep the model resident (faster) for light renders; only
+        # offload for heavy ones (1080p super-res or long clips). Forced via env.
+        if config.OFFLOADING_FORCED is None:
+            offloading = needs_sr or num_frames > config.OFFLOAD_HEAVY_FRAMES
+        else:
+            offloading = config.OFFLOADING_FORCED
+        _log(f"offloading={'on' if offloading else 'off (resident, faster)'}")
+
         out_path = Path(out_path) if out_path else (config.OUTPUT_DIR / "video_silent.mp4")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         cmd = [
             "torchrun", f"--nproc_per_node={config.NPROC}", "generate.py",
             "--prompt", prompt,
-            "--negative_prompt", "",
+            "--negative_prompt", negative,
             "--resolution", res_flag,
             "--aspect_ratio", config.DEFAULT_ASPECT,
             "--video_length", str(num_frames),
@@ -88,7 +103,7 @@ class VideoGenerator:
             "--cache_start_step", str(config.CACHE_START_STEP),
             "--cache_end_step", str(config.CACHE_END_STEP),
             "--cache_step_interval", str(config.CACHE_STEP_INTERVAL),
-            "--offloading", _bstr(config.OFFLOADING),
+            "--offloading", _bstr(offloading),
             "--overlap_group_offloading", _bstr(config.OVERLAP_GROUP_OFFLOADING),
             "--sr", _bstr(needs_sr),
         ]

@@ -72,6 +72,9 @@ MAX_SECONDS = _int("STUDIO_MAX_SECONDS", 16)
 DEFAULT_SECONDS = _int("STUDIO_DEFAULT_SECONDS", 5)
 DEFAULT_STEPS = _int("STUDIO_STEPS", 50)  # official optimal = 50 steps
 DEFAULT_ASPECT = os.environ.get("STUDIO_ASPECT", "16:9")
+# Cinematic prompt enhancement + artifact-killing negative prompt (see
+# prompt_enhance.py). Big realism/film-action win at zero extra VRAM.
+ENHANCE_PROMPT = _flag("STUDIO_ENHANCE", True)
 NPROC = _int("STUDIO_NPROC", 1)          # GPUs for torchrun (A100 single)
 
 # UI resolution -> (generate.py --resolution, needs_super_resolution_to_1080)
@@ -108,9 +111,15 @@ CACHE_TYPE = os.environ.get("CACHE_TYPE", "teacache")  # deepcache | teacache | 
 CACHE_START_STEP = _int("CACHE_START_STEP", 11)   # begin skipping steps here
 CACHE_END_STEP = _int("CACHE_END_STEP", 45)       # stop skipping here
 CACHE_STEP_INTERVAL = _int("CACHE_STEP_INTERVAL", 4)
-# CPU offloading: fit long/1080p renders comfortably in 80GB.
-OFFLOADING = _flag("OFFLOADING", True)
+# CPU offloading: needed to fit heavy renders (1080p / long clips) in 80GB, but it
+# costs speed. SMART default -> we keep the model RESIDENT for light renders (more
+# VRAM used = faster) and only offload for heavy ones. Set OFFLOADING=1 to force on,
+# 0 to force off; leave unset for the automatic/smart behaviour.
+_OFFLOAD_ENV = os.environ.get("OFFLOADING")
+OFFLOADING_FORCED = None if _OFFLOAD_ENV is None else _flag("OFFLOADING", True)
 OVERLAP_GROUP_OFFLOADING = _flag("OVERLAP_GROUP_OFFLOADING", True)
+# Above this frame count OR at 1080p we auto-enable offloading in smart mode.
+OFFLOAD_HEAVY_FRAMES = _int("OFFLOAD_HEAVY_FRAMES", 193)  # ~8s @ 24fps
 # CFG-distilled transformer: ~2x speedup (must still use 50 steps).
 CFG_DISTILLED = _flag("CFG_DISTILLED", False)
 # Sparse attention (SSTA) requires H-series GPUs -> OFF on A100.
@@ -121,6 +130,12 @@ DTYPE = os.environ.get("STUDIO_DTYPE", "bf16")  # bf16 | fp32; fp8 gemm via sgl-
 
 # Foley offload (XXL: 20GB -> 12GB). Auto-enabled if free VRAM is tight.
 FOLEY_OFFLOAD = _flag("FOLEY_OFFLOAD", False)
+# Foley quality knobs (real infer.py flags). XXL model, 50 steps and slightly
+# higher guidance = richer, more on-action-synced sound. All env-overridable.
+FOLEY_MODEL_SIZE = os.environ.get("FOLEY_MODEL_SIZE", "xxl")
+FOLEY_STEPS = _int("FOLEY_STEPS", 50)
+FOLEY_GUIDANCE = float(os.environ.get("FOLEY_GUIDANCE", "4.5"))
+FOLEY_NEG_PROMPT = os.environ.get("FOLEY_NEG_PROMPT", "noisy, harsh, distorted, muffled, low quality")
 
 # --- Speed / hardware tuning (A100 80GB, 12 vCPU) --------------------------
 # TF32 matmul + cuDNN autotune: free throughput on Ampere, no quality hit.

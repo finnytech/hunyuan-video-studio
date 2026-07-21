@@ -47,8 +47,12 @@ def add_foley(video_in: Path, prompt: str, out_dir: Optional[Path] = None) -> Pa
     cmd = [
         sys.executable, "infer.py",
         "--model_path", str(weights_dir),
+        "--model_size", config.FOLEY_MODEL_SIZE,
         "--single_video", str(video_in),
         "--single_prompt", prompt,
+        "--neg_prompt", config.FOLEY_NEG_PROMPT,
+        "--guidance_scale", str(config.FOLEY_GUIDANCE),
+        "--num_inference_steps", str(config.FOLEY_STEPS),
         "--output_dir", str(out_dir),
     ]
     if offload:
